@@ -1,0 +1,12 @@
+%sql
+create or replace table hive_metastore.retail_db.customer_summary_gold 
+as (
+  select customer_id, sum(amount) as total_spent, max(txn_date) as last_txn_date, count(txn_id) as txn_count 
+  from hive_metastore.retail_db.transactions_silver
+  group by customer_id
+)
+order by total_spent,txn_count, last_txn_date desc
+
+#show results from gold table
+select * from hive_metastore.retail_db.customer_summary_gold
+order by total_spent desc
