@@ -1,0 +1,59 @@
+from pyspark.sql.functions import col, row_number, coalesce, to_date
+from pyspark.sql.window import Window
+
+# Create Silver Delta table if not exists
+spark.sql("""
+CREATE TABLE IF NOT EXISTS hive_metastore.retail_db.transactions_silver (
+    txn_id INT,
+    customer_id INT,
+    product_id INT,
+    amount DOUBLE,
+    txn_date DATE,
+    city STRING
+) USING DELTA
+""")
+
+# Read Bronze
+bronze_df = (
+    spark.table("hive_metastore.retail_db.transactions_bronze")
+    .withColumn("txn_id", col("txn_id").cast("int"))
+    .withColumn("customer_id", col("customer_id").cast("int"))
+    .withColumn("product_id", col("product_id").cast("int"))
+    .withColumn("amount", col("amount").cast("double"))
+    .withColumn("city", col("city").cast("string"))
+    .withColumn("txn_date", coalesce(
+        to_date("txn_date", "yyyy-MM-dd"),
+        to_date("txn_date", "MM/dd/yyyy"),
+        to_date("txn_date", "dd.MM.yyyy"),
+        to_date("txn_date", "MMM dd, yyyy")
+    ))
+)
+
+# Deduplicate: latest txn_date per txn_id, customer_id
+windowSpec = Window.partitionBy("customer_id", "txn_id").orderBy(col("txn_date").desc())
+silver_incoming_df = bronze_df.withColumn("rnk", row_number().over(windowSpec)).filter(col("rnk") == 1).drop("rnk")
+
+bronze_df.createOrReplaceTempView("silver_table")
+
+spark.sql("""
+MERGE INTO hive_metastore.retail_db.transactions_silver t
+USING silver_table st
+ON t.txn_id = st.txn_id
+WHEN MATCHED AND (
+    t.customer_id <> st.customer_id OR
+    t.product_id <> st.product_id OR
+    t.amount <> st.amount OR
+    t.txn_date <> st.txn_date OR
+    t.city <> st.city
+) THEN
+    UPDATE SET
+        t.customer_id = st.customer_id,
+        t.product_id = st.product_id,
+        t.amount = st.amount,
+        t.txn_date = st.txn_date,
+        t.city = st.city
+WHEN NOT MATCHED THEN
+    INSERT (txn_id, customer_id, product_id, amount, txn_date, city)
+    VALUES (st.txn_id, st.customer_id, st.product_id, st.amount, st.txn_date, st.city)
+""")
+
