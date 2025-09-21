@@ -1,0 +1,53 @@
+from pyspark.sql.functions import input_file_name, current_timestamp
+
+# Paths
+source_path = '/FileStore/tables/customers/daily/'
+
+# Create Delta tables if not exists
+spark.sql("""
+CREATE TABLE IF NOT EXISTS hive_metastore.retail_db.transactions_bronze (
+    txn_id STRING,
+    customer_id STRING,
+    product_id STRING,
+    amount STRING,
+    txn_date STRING,
+    city STRING,
+    source_file STRING,
+    ingested_at TIMESTAMP
+) USING DELTA
+""")
+
+spark.sql("""
+CREATE TABLE IF NOT EXISTS hive_metastore.retail_db.processed_transaction_files (
+    file_name STRING,
+    ingested_at TIMESTAMP
+) USING DELTA
+""")
+
+# List files
+all_files = [f.name for f in dbutils.fs.ls(source_path)]
+processed_files = [row.file_name for row in spark.table("hive_metastore.retail_db.processed_transaction_files").collect()]
+
+# Filter new files
+new_files = [f for f in all_files if f not in processed_files]
+
+if len(new_files) == 0:
+    print("No new files")
+else:
+    print("New files:", new_files)
+
+    # Read new files
+    bronze_df = (
+        spark.read.option("header", "true").option("inferSchema", "true")
+        .csv([source_path + f for f in new_files])
+        .withColumn("source_file", input_file_name())
+        .withColumn("ingested_at", current_timestamp())
+    )
+
+    # Write to Bronze table
+    bronze_df.write.mode("append").format("delta").option("mergeSchema", "true").saveAsTable("hive_metastore.retail_db.transactions_bronze")
+
+    # Update processed files table
+    processed_df = spark.createDataFrame([(f,) for f in new_files], ["file_name"]) \
+        .withColumn("ingested_at", current_timestamp())
+    processed_df.write.mode("append").format("delta").option("mergeSchema", "true").saveAsTable("hive_metastore.retail_db.processed_transaction_files")
